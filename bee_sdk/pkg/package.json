@@ -1,0 +1,20 @@
+{
+  "name": "bee-sdk",
+  "type": "module",
+  "version": "6.0.0",
+  "license": "LicenseRef-Acki-Nacki-Node-License",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gosh-sh/bee-engine"
+  },
+  "files": [
+    "bee_sdk_bg.wasm",
+    "bee_sdk.js",
+    "bee_sdk.d.ts"
+  ],
+  "main": "bee_sdk.js",
+  "types": "bee_sdk.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
