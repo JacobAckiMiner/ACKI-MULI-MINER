@@ -8,6 +8,7 @@ const beeSdkPkgDir = fileURLToPath(new URL("../../../bee_sdk/pkg", import.meta.u
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: process.env.CAPACITOR_BUILD === "true" ? "./" : "/",
   plugins: [react()],
   server: {
     fs: {

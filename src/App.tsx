@@ -14,7 +14,7 @@ import "./App.css";
 
 import { useEffect, useRef, useState } from "react";
 
-const APP_ID = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const APP_ID = "0x0000000000000000000000000000000000000000000000000000000000000041";
 const ENDPOINTS = ["https://shellnet.ackinacki.org"];
 const API_URL = "https://app-backend.ackinacki.org/api";
 const ACTIVE_SESSION_STORAGE_KEY = "bee_connect_demo_active_session_v1";
