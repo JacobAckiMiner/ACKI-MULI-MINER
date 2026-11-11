@@ -1260,7 +1260,7 @@ function App() {
       </div>
       <h1>ACKI Multi Miner</h1>
       <p style={{ color: "#888", fontSize: "0.85em", margin: "-8px 0 12px" }}>
-        Network: Shellnet
+        Network: Mainnet
       </p>
 
       {isWasmLoading && <div>Loading WASM...</div>}
