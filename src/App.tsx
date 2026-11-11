@@ -18,6 +18,7 @@ const APP_ID = "0x00000000000000000000000000000000000000000000000000000000000000
 const ENDPOINTS = ["https://shellnet.ackinacki.org"];
 const API_URL = "https://app-backend.ackinacki.org/api";
 const ACTIVE_SESSION_STORAGE_KEY = "bee_connect_demo_active_session_v1";
+const WALLET_CONNECTIONS_STORAGE_KEY = "bee_connect_demo_wallet_connections_v1";
 const MINING_KEYS_STORAGE_PREFIX = "bee_connect_demo_mining_keys_v1";
 const SESSION_POLL_INTERVAL_MS = 10000;
 const BALANCE_POLL_INTERVAL_MS = 10000;
@@ -113,54 +114,64 @@ type MinerDebugInfo = {
   updatedAt: string;
 };
 
-function readStoredWalletConnection(): WalletConnection | null {
-  if (typeof window === "undefined") {
-    return null;
+function isWalletConnection(value: unknown): value is WalletConnection {
+  if (!value || typeof value !== "object") return false;
+  const parsed = value as Partial<WalletConnection>;
+  return (
+    typeof parsed.walletName === "string" &&
+    typeof parsed.walletAddress === "string" &&
+    typeof parsed.profileAddress === "string" &&
+    typeof parsed.sessionId === "string" &&
+    typeof parsed.description === "string" &&
+    typeof parsed.sessionStateJson === "string"
+  );
+}
+
+function readStoredWalletConnections(): WalletConnection[] {
+  if (typeof window === "undefined") return [];
+
+  const stored = window.localStorage.getItem(WALLET_CONNECTIONS_STORAGE_KEY);
+  if (stored !== null) {
+    try {
+      const parsed: unknown = JSON.parse(stored);
+      return Array.isArray(parsed) ? parsed.filter(isWalletConnection) : [];
+    } catch {
+      return [];
+    }
   }
 
-  const raw = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
-  if (!raw) {
-    return null;
-  }
+  const legacyRaw = window.localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+  if (!legacyRaw) return [];
 
   try {
-    const parsed = JSON.parse(raw) as Partial<WalletConnection>;
-    if (
-      typeof parsed.walletName !== "string" ||
-      typeof parsed.walletAddress !== "string" ||
-      typeof parsed.profileAddress !== "string" ||
-      typeof parsed.sessionId !== "string" ||
-      typeof parsed.description !== "string" ||
-      typeof parsed.sessionStateJson !== "string"
-    ) {
-      return null;
-    }
+    const parsed: unknown = JSON.parse(legacyRaw);
+    if (!isWalletConnection(parsed)) return [];
 
-    return {
-      walletName: parsed.walletName,
-      walletAddress: parsed.walletAddress,
-      profileAddress: parsed.profileAddress,
-      sessionId: parsed.sessionId,
-      description: parsed.description,
-      sessionStateJson: parsed.sessionStateJson,
-    };
+    const migrated = [parsed];
+    window.localStorage.setItem(WALLET_CONNECTIONS_STORAGE_KEY, JSON.stringify(migrated));
+    return migrated;
   } catch {
-    return null;
+    return [];
   }
 }
 
-function writeStoredWalletConnection(connection: WalletConnection | null) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  if (!connection) {
-    window.localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
-    return;
-  }
-
-  window.localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, JSON.stringify(connection));
+function writeStoredWalletConnections(connections: WalletConnection[]) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(WALLET_CONNECTIONS_STORAGE_KEY, JSON.stringify(connections));
 }
+
+function writeStoredWalletConnection(connection: WalletConnection) {
+  const connections = readStoredWalletConnections();
+  const index = connections.findIndex(
+    (item) => item.profileAddress === connection.profileAddress,
+  );
+
+  if (index >= 0) connections[index] = connection;
+  else connections.push(connection);
+
+  writeStoredWalletConnections(connections);
+}
+
 
 function miningKeysStorageKey(connection: WalletConnection): string {
   return `${MINING_KEYS_STORAGE_PREFIX}:${connection.profileAddress}:${APP_ID}`;
@@ -1056,19 +1067,164 @@ function MinerPanel({ connection }: { connection: WalletConnection }) {
   );
 }
 
+type ConnectedWalletPanelProps = {
+  connection: WalletConnection;
+  isWasmReady: boolean;
+  onRemove: (profileAddress: string) => void;
+};
+
+function ConnectedWalletPanel({
+  connection,
+  isWasmReady,
+  onRemove,
+}: ConnectedWalletPanelProps) {
+  const [balance, setBalance] = useState<string | null>(null);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [isPolling, setIsPolling] = useState(false);
+  const [isDisconnecting, setIsDisconnecting] = useState(false);
+  const [disconnectError, setDisconnectError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isWasmReady) return;
+    let cancelled = false;
+    let inFlight = false;
+
+    const checkSession = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      setIsPolling(true);
+      try {
+        const active = await isSessionStillActive(connection);
+        if (cancelled) return;
+        if (!active) {
+          clearStoredMiningKeys(connection);
+          onRemove(connection.profileAddress);
+          return;
+        }
+        setSessionError(null);
+      } catch (e) {
+        if (!cancelled) {
+          setSessionError(e instanceof Error ? e.message : String(e));
+        }
+      } finally {
+        inFlight = false;
+        if (!cancelled) setIsPolling(false);
+      }
+    };
+
+    void checkSession();
+    const timer = window.setInterval(() => void checkSession(), SESSION_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [isWasmReady, connection.profileAddress, connection.sessionId]);
+
+  useEffect(() => {
+    if (!isWasmReady) return;
+    let cancelled = false;
+    let inFlight = false;
+    const wallet = new Wallet(ENDPOINTS, null, API_URL, APP_ID);
+
+    const pollBalance = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        const result = await wallet.get_multifactor_balances({
+          multifactor_address: connection.walletAddress,
+        });
+        if (cancelled) return;
+        setBalance(formatNanoToDisplay(result.ecc["1"] ?? "0", 9, 4));
+        setBalanceError(null);
+      } catch (e) {
+        if (!cancelled) {
+          setBalanceError(e instanceof Error ? e.message : String(e));
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void pollBalance();
+    const timer = window.setInterval(() => void pollBalance(), BALANCE_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      wallet.free();
+    };
+  }, [isWasmReady, connection.walletAddress]);
+
+  const handleDisconnect = async () => {
+    try {
+      setIsDisconnecting(true);
+      setDisconnectError(null);
+      const beeConnect = new BeeConnect();
+      await beeConnect.disconnect_session(
+        ENDPOINTS,
+        connection.sessionId,
+        connection.description,
+        connection.sessionStateJson,
+        "user_requested",
+        30,
+        1000,
+      );
+      clearStoredMiningKeys(connection);
+      onRemove(connection.profileAddress);
+    } catch (e) {
+      setDisconnectError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsDisconnecting(false);
+    }
+  };
+
+  const handleSessionDesync = () => {
+    clearStoredMiningKeys(connection);
+    onRemove(connection.profileAddress);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+      <div>
+        Connected wallet: <strong>{connection.walletName}</strong>{" "}
+        <span>NACKL: {balance ?? "..."}</span>
+      </div>
+      {balanceError && <div style={{ color: "#e74c3c" }}>{balanceError}</div>}
+      {sessionError && <div style={{ color: "#e74c3c" }}>{sessionError}</div>}
+      <div>Session monitor: {isPolling ? "checking..." : "active"}</div>
+      <button type="button" onClick={handleDisconnect} disabled={isDisconnecting}>
+        {isDisconnecting ? "Disconnecting..." : "Disconnect"}
+      </button>
+      {disconnectError && <div style={{ color: "#e74c3c" }}>{disconnectError}</div>}
+      <VerifyWalletPanel connection={connection} onSessionDesync={handleSessionDesync} />
+      <MinerPanel key={connection.profileAddress} connection={connection} />
+    </div>
+  );
+}
+
+
 function App() {
-  const [walletConnection, setWalletConnection] = useState<WalletConnection | null>(() =>
-    readStoredWalletConnection(),
+  const [walletConnections, setWalletConnections] = useState<WalletConnection[]>(() =>
+    readStoredWalletConnections(),
   );
   const [isWasmLoading, setIsWasmLoading] = useState(true);
   const [isWasmReady, setIsWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState<string | null>(null);
-  const [disconnectError, setDisconnectError] = useState<string | null>(null);
-  const [isDisconnecting, setIsDisconnecting] = useState(false);
-  const [sessionMonitorError, setSessionMonitorError] = useState<string | null>(null);
-  const [isSessionPolling, setIsSessionPolling] = useState(false);
-  const [nacklBalance, setNacklBalance] = useState<string | null>(null);
-  const [nacklBalanceError, setNacklBalanceError] = useState<string | null>(null);
+
+  const addWalletConnection = (connection: WalletConnection) => {
+    setWalletConnections((current) => [
+      ...current.filter(
+        (item) => item.profileAddress !== connection.profileAddress,
+      ),
+      connection,
+    ]);
+  };
+
+  const removeWalletConnection = (profileAddress: string) => {
+    setWalletConnections((current) =>
+      current.filter((item) => item.profileAddress !== profileAddress),
+    );
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -1078,19 +1234,13 @@ function App() {
         setIsWasmLoading(true);
         setWasmError(null);
         await initBeeSdk();
-        if (!mounted) {
-          return;
-        }
-        setIsWasmReady(true);
+        if (mounted) setIsWasmReady(true);
       } catch (e) {
-        if (!mounted) {
-          return;
-        }
-        setWasmError(e instanceof Error ? e.message : String(e));
-      } finally {
         if (mounted) {
-          setIsWasmLoading(false);
+          setWasmError(e instanceof Error ? e.message : String(e));
         }
+      } finally {
+        if (mounted) setIsWasmLoading(false);
       }
     })();
 
@@ -1100,239 +1250,39 @@ function App() {
   }, []);
 
   useEffect(() => {
-    writeStoredWalletConnection(walletConnection);
-  }, [walletConnection]);
-
-  useEffect(() => {
-    if (!isWasmReady || !walletConnection) {
-      setIsSessionPolling(false);
-      return;
-    }
-
-    let cancelled = false;
-    let inFlight = false;
-
-    const checkSession = async () => {
-      if (cancelled || inFlight) {
-        return;
-      }
-      inFlight = true;
-      setIsSessionPolling(true);
-
-      try {
-        const exists = await isSessionStillActive(walletConnection);
-        if (cancelled) {
-          return;
-        }
-
-        if (!exists) {
-          console.error(
-            "[SESSION_MONITOR] session inactive — dropping connection. wallet:",
-            walletConnection.walletName,
-            "profile:",
-            walletConnection.profileAddress,
-          );
-          clearStoredMiningKeys(walletConnection);
-          setSessionMonitorError("Wallet disconnected the session. Please reconnect.");
-          setWalletConnection(null);
-          return;
-        }
-
-        setSessionMonitorError(null);
-      } catch (e) {
-        if (!cancelled) {
-          setSessionMonitorError(
-            `Session monitor failed: ${e instanceof Error ? e.message : String(e)}`,
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setIsSessionPolling(false);
-        }
-        inFlight = false;
-      }
-    };
-
-    void checkSession();
-    const intervalId = window.setInterval(() => {
-      void checkSession();
-    }, SESSION_POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [isWasmReady, walletConnection]);
-
-  useEffect(() => {
-    if (!isWasmReady || !walletConnection) {
-      setNacklBalance(null);
-      setNacklBalanceError(null);
-      return;
-    }
-
-    let cancelled = false;
-    let inFlight = false;
-    const wallet = new Wallet(ENDPOINTS, null, API_URL, APP_ID);
-
-    const pollBalance = async () => {
-      if (cancelled || inFlight) {
-        return;
-      }
-      inFlight = true;
-
-      try {
-        const nativeBalances = await wallet.get_multifactor_balances({
-          multifactor_address: walletConnection.walletAddress,
-        });
-        if (cancelled) {
-          return;
-        }
-
-        const token1 = nativeBalances.ecc["1"] ?? "0";
-        setNacklBalance(formatNanoToDisplay(token1, 9, 4));
-        setNacklBalanceError(null);
-      } catch (e) {
-        if (!cancelled) {
-          setNacklBalanceError(e instanceof Error ? e.message : String(e));
-        }
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    void pollBalance();
-    const intervalId = window.setInterval(() => {
-      void pollBalance();
-    }, BALANCE_POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-      wallet.free();
-    };
-  }, [isWasmReady, walletConnection]);
-
-  const handleDisconnect = async () => {
-    if (!walletConnection) {
-      return;
-    }
-
-    try {
-      console.log("[DISCONNECT] user requested disconnect");
-      setIsDisconnecting(true);
-      setDisconnectError(null);
-
-      const beeConnect = new BeeConnect();
-      await beeConnect.disconnect_session(
-        ENDPOINTS,
-        walletConnection.sessionId,
-        walletConnection.description,
-        walletConnection.sessionStateJson,
-        "user_requested",
-        30,
-        1000,
-      );
-
-      clearStoredMiningKeys(walletConnection);
-      setSessionMonitorError(null);
-      setNacklBalance(null);
-      setNacklBalanceError(null);
-      setWalletConnection(null);
-    } catch (e) {
-      setDisconnectError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setIsDisconnecting(false);
-    }
-  };
+    writeStoredWalletConnections(walletConnections);
+  }, [walletConnections]);
 
   return (
     <>
       <div className="logo-shell">
         <img src={Logo} className="logo logo-spin" alt="Nackl logo" />
       </div>
-      <h1>Acki-connect demo</h1>
-      <p style={{ color: "#888", fontSize: "0.85em", margin: "-8px 0 12px" }}>Network: shellnet</p>
+      <h1>ACKI Multi Miner</h1>
+      <p style={{ color: "#888", fontSize: "0.85em", margin: "-8px 0 12px" }}>
+        Network: Shellnet
+      </p>
 
-      {isWasmLoading && <div>Loading wasm...</div>}
+      {isWasmLoading && <div>Loading WASM...</div>}
 
       {!isWasmLoading && wasmError && (
-        <div style={{ color: "#e74c3c" }}>Failed to init wasm: {wasmError}</div>
-      )}
-      {sessionMonitorError && (
-        <div
-          style={{
-            color: "rgba(255, 196, 110, 0.95)",
-            background: "rgba(255, 196, 110, 0.08)",
-            border: "1px solid rgba(255, 196, 110, 0.25)",
-            borderRadius: "10px",
-            padding: "12px 16px",
-            marginBottom: "12px",
-          }}
-        >
-          {sessionMonitorError}
+        <div style={{ color: "#e74c3c" }}>
+          Failed to initialize WASM: {wasmError}
         </div>
       )}
 
-      {!isWasmLoading && isWasmReady && !walletConnection ? (
-        <WalletConnect
-          onConnected={(connection) => {
-            setSessionMonitorError(null);
-            setWalletConnection(connection);
-          }}
-        />
-      ) : (
-        walletConnection && (
-          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-            <div>
-              Connected wallet: <strong>{walletConnection.walletName}</strong>{" "}
-              <span style={{ color: "rgba(255, 255, 255, 0.78)" }}>
-                (NACKL: {nacklBalance ?? "..."})
-              </span>
-              {walletConnection.inlineChallenge && (
-                <span style={{ color: "#2ecc71", marginLeft: "8px" }}>verified at connect</span>
-              )}
-            </div>
-            {walletConnection.inlineChallenge && (
-              <div
-                style={{
-                  fontSize: "0.8rem",
-                  color: "rgba(255, 255, 255, 0.55)",
-                  wordBreak: "break-all",
-                }}
-              >
-                <div>nonce: {walletConnection.inlineChallenge.nonce}</div>
-                <div>signature: {walletConnection.inlineChallenge.signature}</div>
-                <div>epk: {walletConnection.inlineChallenge.epkPublic}</div>
-              </div>
-            )}
-            {nacklBalanceError && (
-              <div style={{ color: "rgba(255, 196, 110, 0.9)" }}>
-                NACKL polling warning: {nacklBalanceError}
-              </div>
-            )}
-            <div style={{ color: "rgba(255, 255, 255, 0.72)" }}>
-              Session monitor: {isSessionPolling ? "checking..." : "active"}
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "center" }}>
-              <button type="button" onClick={handleDisconnect} disabled={isDisconnecting}>
-                {isDisconnecting ? "Disconnecting..." : "Disconnect"}
-              </button>
-            </div>
-            {disconnectError && <div style={{ color: "#e74c3c" }}>{disconnectError}</div>}
-            <VerifyWalletPanel
-              connection={walletConnection}
-              onSessionDesync={() => {
-                console.error("[APP] onSessionDesync fired — dropping connection");
-                clearStoredMiningKeys(walletConnection);
-                setWalletConnection(null);
-              }}
-            />
-            <MinerPanel key={walletConnection.profileAddress} connection={walletConnection} />
-          </div>
-        )
+      {isWasmReady && (
+        <WalletConnect onConnected={addWalletConnection} />
       )}
+
+      {walletConnections.map((connection) => (
+        <ConnectedWalletPanel
+          key={connection.profileAddress}
+          connection={connection}
+          isWasmReady={isWasmReady}
+          onRemove={removeWalletConnection}
+        />
+      ))}
     </>
   );
 }
