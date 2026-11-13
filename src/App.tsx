@@ -845,9 +845,36 @@ function MinerPanel({ connection }: { connection: WalletConnection }) {
           }
           setMinerAddress(resolvedMinerAddress);
           setAreKeysPropagated(true);
-          setRequestStatus(
-            "Mining keys propagated and saved in browser storage. You can init miner.",
-          );
+          try {
+            const instance = await initMiner(
+              resolvedMinerAddress,
+              generated.public,
+              generated.secret,
+            );
+
+            if (token !== propagationTokenRef.current) {
+              instance.free();
+              return;
+            }
+
+            setMiner(instance);
+            minerRef.current = instance;
+
+            const canStart = instance.can_start();
+            setCanStartMiner(canStart);
+
+            if (canStart) {
+              instance.start(15000, handleMinerCallback);
+              setIsMinerRunning(true);
+              setCanStartMiner(false);
+              setRequestStatus("Miner initialized and mining started automatically.");
+            } else {
+              setRequestStatus("Miner initialized. Waiting for mining readiness.");
+            }
+          } catch (e) {
+            setRequestStatus("Mining keys registered, but miner initialization failed.");
+            setRequestError(e instanceof Error ? e.message : String(e));
+          }
         } catch (e) {
           if (token !== propagationTokenRef.current) {
             return;
