@@ -277,6 +277,7 @@ type WalletConnectProps = {
 };
 
 function WalletConnect({ onConnected }: WalletConnectProps) {
+  const [walletNameInput, setWalletNameInput] = useState("");
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const [isWaitingWallet, setIsWaitingWallet] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -294,9 +295,18 @@ function WalletConnect({ onConnected }: WalletConnectProps) {
   };
 
   const handleConnect = async (withChallenge: boolean) => {
+    const requestedWalletName = walletNameInput.trim();
+    if (!requestedWalletName) {
+      setError("Please enter a registered wallet name.");
+      return;
+    }
     try {
       setIsCreatingSession(true);
       setError(null);
+      const registeredMinerAddress = await getMinerAddress(requestedWalletName);
+      if (!registeredMinerAddress || !registeredMinerAddress.trim()) {
+        throw new Error("Wallet name was not found on Mainnet.");
+      }
       setDeepLink(null);
       setSessionId(null);
       setIsWaitingWallet(false);
@@ -341,6 +351,10 @@ function WalletConnect({ onConnected }: WalletConnectProps) {
             return;
           }
 
+          if (hello.wallet_name.trim().toLowerCase() !== requestedWalletName.toLowerCase()) {
+            setError("Connected wallet name does not match the registered wallet name.");
+            return;
+          }
           const connection: WalletConnection = {
             walletName: hello.wallet_name,
             walletAddress: hello.wallet_address,
@@ -391,14 +405,20 @@ function WalletConnect({ onConnected }: WalletConnectProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "12px", alignItems: "center" }}>
       {!deepLink && (
-        <div style={{ display: "flex", gap: "10px" }}>
+        <>
+          <label style={{ width: "100%", maxWidth: "320px" }}>
+            Registered Wallet Name
+            <input type="text" value={walletNameInput} onChange={(event) => setWalletNameInput(event.target.value)} placeholder="Enter registered wallet name" autoComplete="off" disabled={isCreatingSession} />
+          </label>
+          <div style={{ display: "flex", gap: "10px" }}>
           <button type="button" onClick={() => handleConnect(false)} disabled={isCreatingSession}>
             {isCreatingSession && connectMode === "simple" ? "Creating..." : "Connect"}
           </button>
           <button type="button" onClick={() => handleConnect(true)} disabled={isCreatingSession}>
             {isCreatingSession && connectMode === "verified" ? "Creating..." : "Connect + Verify"}
           </button>
-        </div>
+          </div>
+        </>
       )}
 
       {deepLink && (
