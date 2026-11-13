@@ -59,8 +59,8 @@ async function waitForMiningKeysPropagation(walletName: string, ownerPublic: str
     miner_address: minerAddress,
     app_id: APP_ID,
     expected_owner_public: ownerPublic,
-    max_attempts: 120,
-    interval_ms: 2000,
+    max_attempts: 30,
+    interval_ms: 1000,
   });
 
   return minerAddress;
